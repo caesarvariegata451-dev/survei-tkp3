@@ -66,23 +66,55 @@ STATUS_OK = "Berhasil"
 STATUS_MANUAL = "Koordinat Manual"
 STATUS_GAGAL = "Gagal - Cek Manual"
 
+PRESISI_PATOKAN = "Patokan (pasar/SPBU/masjid, dll.)"
 PRESISI_JALAN = "Jalan"
+PRESISI_DUSUN = "Dusun"
 PRESISI_DESA = "Desa/Kelurahan"
-PRESISI_KEC = "Kecamatan (titik tengah)"
+PRESISI_KEC = "Pusat kecamatan (perkiraan)"
+PRESISI_KEC_LAMA = "Kecamatan (titik tengah)"     # label versi lama (CSV lama)
 PRESISI_MANUAL = "Manual (surveyor)"
+PRESISI_KASAR = {PRESISI_DUSUN, PRESISI_DESA, PRESISI_KEC, PRESISI_KEC_LAMA}
 
 WARNA_MARKER = {           # warna folium.Icon per tingkat presisi
+    PRESISI_PATOKAN: "red",
     PRESISI_JALAN: "red",
+    PRESISI_DUSUN: "orange",
     PRESISI_DESA: "orange",
     PRESISI_KEC: "cadetblue",
+    PRESISI_KEC_LAMA: "cadetblue",
     PRESISI_MANUAL: "purple",
 }
 EMOJI_PRESISI = {
+    PRESISI_PATOKAN: "🔴",
     PRESISI_JALAN: "🔴",
+    PRESISI_DUSUN: "🟠",
     PRESISI_DESA: "🟠",
     PRESISI_KEC: "🔵",
+    PRESISI_KEC_LAMA: "🔵",
     PRESISI_MANUAL: "🟣",
 }
+
+# Validasi tambahan: hasil harus dekat kecamatan TKP (bukan sekadar di kabupaten).
+TOLERANSI_KEC_KM = 3.0      # toleransi ke batas poligon kecamatan (data batas OSM sering kurang presisi)
+RADIUS_KEC_KM = 12.0        # dipakai bila hanya titik pusat kecamatan yang diketahui
+# Kata yang bukan bagian nama jalan: "Jalan Umum jurusan X - Y" → "Jalan X Y"
+POLA_KATA_SAMPAH_JALAN = re.compile(r"\b(?:umum|jurusan)\b\.?", re.IGNORECASE)
+# Jenis patokan yang biasa ada namanya di peta (OSM): "depan Pasar Tempel" → "Pasar Tempel"
+KATA_POI = (
+    r"pasar|masjid|musholl?a|mushola|langgar|gereja|pura|vihara|klenteng|sekolah|sdn?|smpn?|"
+    r"sman?|smkn?|mts|mi|ma|pondok|ponpes|pesantren|spbu|puskesmas|rsud|rs|rumah\s+sakit|"
+    r"klinik|kantor|balai|toko|swalayan|alfamart|indomaret|bank|pabrik|terminal|stasiun|"
+    r"jembatan|makam|tpu|lapangan|stadion|taman|hotel|rumah\s+makan|bengkel|koramil|polsek|"
+    r"kodim|gapura|tugu|bendungan|waduk|perlintasan|pos\s+polisi"
+)
+POLA_POI_ISYARAT = re.compile(   # patokan yang diawali kata penunjuk arah/posisi
+    r"\b(?:depan|dekat|sebelah|samping|seberang|belakang|utara|selatan|timur|barat|turut|pinggir)"
+    r"\s+(?:(?:di|pintu|masuk|gerbang|area|halaman|komplek|kompleks|kawasan)\s+)*"
+    rf"(?P<v>(?:{KATA_POI})\b.*)",
+    re.IGNORECASE,
+)
+POLA_POI_BEBAS = re.compile(rf"(?<!jl\.)(?<!jl)(?<!jalan)\s(?P<v>(?:{KATA_POI})\b.*)", re.IGNORECASE)
+POLA_DUSUN = re.compile(r"\b(?:dusun|dsn|dukuh|dk)\b\.?\s*[:\-]?\s*(?P<v>[^,;\n()/]+)", re.IGNORECASE)
 
 # Kata yang menandai AKHIR sebuah nama (jalan/desa/kecamatan/kabupaten).
 # Contoh: "Kec. Cepu Kab. Blora" → nama kecamatan berhenti di kata "Kab".
@@ -93,6 +125,7 @@ KATA_HENTI = {
     "dk", "dukuh", "polsek", "polres", "polresta", "polrestabes", "polda",
     "wilayah", "wil", "sekitar", "pukul", "jam", "tepatnya", "tepat", "arah",
     "jurusan", "km", "kilometer", "depan", "dekat", "sebelah", "samping",
+    "ikut", "termasuk", "belakang",
     "seberang", "turut", "masuk", "simpang", "pertigaan", "perempatan", "no",
     "nomor", "kode", "kodepos", "yang", "dan", "antara", "tgl", "tanggal",
     "hari", "waktu", "lokasi", "tkp", "jalan", "jl", "jln", "ruas",
@@ -231,7 +264,8 @@ POLA_KAB = [
 POLA_PATOKAN = re.compile(   # berhenti sebelum nama desa/kecamatan/kabupaten
     r"\b(?:depan|dekat|sebelah|samping|seberang|turut|tepatnya|km\.?\s*\d+|kilometer|"
     r"simpang|pertigaan|perempatan|jembatan|spbu|pasar|masjid|sekolah)\b"
-    r"(?:(?!\b(?:ds|desa|kel|kelurahan|kec|kecamatan|kab|kabupaten|kota|rt|rw)\b)[^,;\n]){0,60}",
+    r"(?:(?!\b(?:ds|dsn|dusun|desa|kel|kelurahan|kec|kecamatan|kab|kabupaten|kota|rt|rw|ikut|"
+    r"termasuk|wilayah)\b)[^,;\n]){0,60}",
     re.IGNORECASE,
 )
 POLA_NO_LP = re.compile(r"\b(LP\s*/\s*[A-Z0-9][^\n]{2,140})", re.IGNORECASE)
@@ -291,6 +325,28 @@ def _ambil_label(teks: str, pola_label: str) -> str:
     return ""
 
 
+def ambil_poi(teks: str) -> str:
+    """Nama patokan yang bisa dicari di peta, mis. 'depan Pasar Tempel ikut wilayah'
+    → 'Pasar Tempel'. Harus berupa jenis tempat + nama (minimal 2 kata)."""
+    for pola in (POLA_POI_ISYARAT, POLA_POI_BEBAS):
+        for m in pola.finditer(teks or ""):
+            hasil = []
+            for token in m.group("v").split():
+                kn = _norm(token)
+                if not kn:
+                    continue
+                if hasil and (kn.split()[0] in KATA_HENTI or kn.split()[0] == "wilayah"):
+                    break
+                bersih = token.strip(".,;:'\"()")
+                if bersih:
+                    hasil.append(bersih if bersih.isupper() and len(bersih) <= 5 else bersih.title())
+                if len(hasil) >= 4 or token.endswith((",", ";")):
+                    break
+            if len(hasil) >= 2:
+                return " ".join(hasil)
+    return ""
+
+
 def _cari_kabupaten(teks: str) -> tuple[str, str]:
     """Kembalikan (nama, jenis) kabupaten/kota dari potongan teks alamat."""
     for pola, jenis in POLA_KAB:
@@ -306,7 +362,7 @@ def parse_lp(teks: str) -> dict:
     dari blok TKP (atau isian berlabel / kronologi), tidak dari alamat korban."""
     info = {
         "no_lp": "", "waktu": "", "polres": "", "tkp": "", "sumber_tkp": "",
-        "jalan": "", "desa": "", "kecamatan": "", "kabupaten": "",
+        "jalan": "", "poi": "", "dusun": "", "desa": "", "kecamatan": "", "kabupaten": "",
         "jenis_wilayah": "", "sumber_wilayah": "", "patokan": "",
     }
 
@@ -339,8 +395,13 @@ def parse_lp(teks: str) -> dict:
     if tkp:
         m = POLA_JALAN.search(tkp)
         if m:
-            nama_jl = potong_nama(m.group("v"), maks_kata=6)
+            # "Jalan Umum jurusan Danyang - Banjarsari" → "Jalan Danyang Banjarsari"
+            nama_jl = potong_nama(POLA_KATA_SAMPAH_JALAN.sub(" ", m.group("v")), maks_kata=6)
             info["jalan"] = f"Jalan {nama_jl}" if nama_jl else ""
+        info["poi"] = ambil_poi(tkp)
+        m = POLA_DUSUN.search(tkp)
+        if m:
+            info["dusun"] = potong_nama(m.group("v"))
         m = POLA_DESA.search(tkp)
         if m:
             info["desa"] = potong_nama(m.group("v"))
@@ -357,7 +418,7 @@ def parse_lp(teks: str) -> dict:
     # Awalan seperti "JL." / "KEC." / "KAB." dibuang agar query geocoding bersih.
     if not info["jalan"]:
         isi = POLA_AWALAN_JALAN.sub("", _ambil_label(teks, r"nama\s+jalan|ruas\s+jalan"))
-        jl = potong_nama(isi, maks_kata=6)
+        jl = potong_nama(POLA_KATA_SAMPAH_JALAN.sub(" ", isi), maks_kata=6)
         info["jalan"] = f"Jalan {jl}" if jl else ""
     if not info["desa"]:
         isi = _ambil_label(teks, r"desa\s*/\s*kel(?:urahan)?\.?|kelurahan\s*/\s*desa|kelurahan|desa")
@@ -585,9 +646,76 @@ def cari_wilayah(nama: str, jenis: str):
     raw = pilih_poligon_wilayah(kandidat, nama, jenis)
     if raw is None:
         return None
+    return {"bbox": _bbox_raw(raw), "geojson": raw["geojson"],
+            "display_name": raw.get("display_name", ""),
+            "osm": (raw.get("osm_type"), str(raw.get("osm_id")))}
+
+
+def _bbox_raw(raw: dict) -> tuple:
     s, n, w, e = (float(x) for x in raw["boundingbox"])
-    return {"bbox": (s, n, w, e), "geojson": raw["geojson"],
-            "display_name": raw.get("display_name", "")}
+    return (s, n, w, e)
+
+
+def _perlebar(bbox: tuple, derajat: float) -> tuple:
+    s, n, w, e = bbox
+    return (s - derajat, n + derajat, w - derajat, e + derajat)
+
+
+def _nama_kec(teks) -> str:
+    return re.sub(r"^(?:kecamatan|kec)\s+", "", _norm(teks)).strip()
+
+
+@st.cache_data(show_spinner=False, ttl=30 * 24 * 3600, max_entries=5000)
+def cari_kecamatan(kec: str, kab: str, jenis: str):
+    """Lokasi kecamatan TKP — HANYA yang berada di dalam kab/kota TKP.
+    Mengembalikan titik pusat + poligon batas kecamatan (bila tersedia di OSM).
+    Dipakai untuk (1) lapis terakhir 'pusat kecamatan' dan (2) memastikan hasil
+    jalan/patokan/desa memang dekat kecamatan yang tertulis di LP."""
+    wilayah = cari_wilayah(kab, jenis)
+    viewbox = _perlebar(wilayah["bbox"], 0.02) if wilayah else None
+    target = _nama_kec(kec)
+    poligon, titik = None, None
+    for raw in nominatim_cari(f"{kec}, {kab}", limit=8, viewbox=viewbox, poligon=True):
+        if raw.get("class") not in ("boundary", "place"):
+            continue
+        nd = raw.get("namedetails") or {}
+        nama_osm = [str(v) for k, v in nd.items()
+                    if k in ("name", "official_name", "name:id", "alt_name", "short_name")]
+        if not nama_osm:
+            nama_osm = [str(raw.get("display_name", "")).split(",")[0]]
+        if not any(_nama_kec(n) == target for n in nama_osm):
+            continue
+        lat, lon = float(raw["lat"]), float(raw["lon"])
+        if wilayah:
+            if (raw.get("osm_type"), str(raw.get("osm_id"))) == wilayah.get("osm"):
+                continue                       # itu kabupatennya sendiri (Kec. Blora vs Kab. Blora)
+            if _luas_bbox(raw) >= 0.6 * _luas_bbox({"boundingbox": wilayah["bbox"]}):
+                continue
+            if not titik_dalam_wilayah(lat, lon, wilayah["geojson"]):
+                continue                       # kecamatan bernama sama di kabupaten lain
+        elif not nama_wilayah_cocok(raw, kab):
+            continue
+        geo = raw.get("geojson") or {}
+        if poligon is None and raw.get("class") == "boundary" and geo.get("type") in ("Polygon", "MultiPolygon"):
+            poligon = raw
+        if titik is None:
+            titik = raw
+    if titik is None:
+        return None
+    pusat = poligon or titik
+    return {"lat": float(pusat["lat"]), "lon": float(pusat["lon"]),
+            "geojson": poligon["geojson"] if poligon else None,
+            "bbox": _bbox_raw(poligon) if poligon else None,
+            "display_name": pusat.get("display_name", "")}
+
+
+def dekat_kecamatan(lat: float, lon: float, kec_info) -> bool:
+    """Hasil harus berada di (sekitar) kecamatan yang tertulis di LP."""
+    if not kec_info:
+        return True
+    if kec_info.get("geojson"):
+        return titik_dalam_wilayah(lat, lon, kec_info["geojson"], TOLERANSI_KEC_KM)
+    return haversine_km(lat, lon, kec_info["lat"], kec_info["lon"]) <= RADIUS_KEC_KM
 
 
 def nama_wilayah_cocok(raw: dict, nama_kab: str) -> bool:
@@ -606,30 +734,41 @@ def nama_wilayah_cocok(raw: dict, nama_kab: str) -> bool:
     return any(_nama_dasar(b) == target for b in bagian)
 
 
-def susun_lapisan(info: dict) -> list[tuple[str, str]]:
-    """Urutan query dari paling presisi ke paling kasar. Kabupaten/kota SELALU
-    ikut di query — tidak pernah ada query tanpa kabupaten (anti-nyasar).
-    Nama ditulis polos ("Cepu, Blora") karena itulah nama yang diindeks OSM."""
-    jl, ds, kc, kb = info["jalan"], info["desa"], info["kecamatan"], info["kabupaten"]
+def susun_lapisan(info: dict) -> list[tuple[str, str, bool]]:
+    """Urutan query (presisi, query, lokal) dari paling presisi ke paling kasar.
+
+    - Kabupaten/kota SELALU ikut di query (anti-nyasar), tanpa kabupaten default.
+    - Nama ditulis polos ("Cepu, Blora") karena itulah nama yang diindeks OSM.
+    - lokal=True: query tanpa nama kecamatan (berguna bila data OSM tidak mencatat
+      desa/jalan di bawah nama kecamatan itu) → pencarian dibatasi ke sekitar
+      kecamatan TKP, dan hasilnya tetap wajib lolos uji jarak ke kecamatan.
+    """
+    poi, jl = info.get("poi", ""), info.get("jalan", "")
+    dsn, ds = info.get("dusun", ""), info.get("desa", "")
+    kc, kb = info.get("kecamatan", ""), info.get("kabupaten", "")
     calon = []
+    if poi:
+        calon.append((PRESISI_PATOKAN, [poi, kb], True))          # "Pasar Tempel, Grobogan"
     if jl and ds and kc:
-        calon.append((PRESISI_JALAN, [jl, ds, kc, kb]))
+        calon.append((PRESISI_JALAN, [jl, ds, kc, kb], False))
     if jl and kc:
-        calon.append((PRESISI_JALAN, [jl, kc, kb]))          # spesifikasi (a)
-    if jl and not kc:
-        calon.append((PRESISI_JALAN, [jl, ds, kb] if ds else [jl, kb]))
+        calon.append((PRESISI_JALAN, [jl, kc, kb], False))        # spesifikasi (a)
+    if jl:
+        calon.append((PRESISI_JALAN, [jl, kb], True))
+    if dsn:
+        calon.append((PRESISI_DUSUN, [dsn, ds, kb] if ds else [dsn, kb], True))
     if ds and kc:
-        calon.append((PRESISI_DESA, [ds, kc, kb]))
-    if ds and not kc:
-        calon.append((PRESISI_DESA, [ds, kb]))
+        calon.append((PRESISI_DESA, [ds, kc, kb], False))
+    if ds:
+        calon.append((PRESISI_DESA, [ds, kb], True))
     if kc:
-        calon.append((PRESISI_KEC, [kc, kb]))                # spesifikasi (b)
+        calon.append((PRESISI_KEC, [kc, kb], False))              # spesifikasi (b)
     hasil, sudah = [], set()
-    for presisi, bagian in calon:
+    for presisi, bagian, lokal in calon:
         q = ", ".join(bagian)
         if q.lower() not in sudah:
             sudah.add(q.lower())
-            hasil.append((presisi, q))
+            hasil.append((presisi, q, lokal))
     return hasil
 
 
@@ -639,9 +778,11 @@ def _gagal(alasan: str, **lain) -> dict:
 
 
 def geocode_berlapis(info: dict) -> dict:
-    """Geocoding berlapis. Hasil hanya diterima bila titiknya di dalam poligon
-    kabupaten/kota TKP (atau, bila poligon tak tersedia, nama kab/kota cocok)."""
+    """Geocoding berlapis. Hasil hanya diterima bila titiknya (1) di dalam poligon
+    kabupaten/kota TKP (atau, bila poligon tak tersedia, nama kab/kota cocok), dan
+    (2) dekat kecamatan TKP bila kecamatannya ditemukan di peta."""
     kab, jenis = info.get("kabupaten", ""), info.get("jenis_wilayah", "")
+    kec = info.get("kecamatan", "")
     if not kab:
         return _gagal("Kabupaten/Kota TKP tidak terbaca di LP")
     lapisan = susun_lapisan(info)
@@ -650,27 +791,39 @@ def geocode_berlapis(info: dict) -> dict:
     label_wil = f"{jenis or 'Kab/Kota'} {kab}"
     try:
         wilayah = cari_wilayah(kab, jenis)
-        viewbox = None
-        if wilayah:
-            s, n, w, e = wilayah["bbox"]
-            viewbox = (s - 0.02, n + 0.02, w - 0.02, e + 0.02)
+        kec_info = cari_kecamatan(kec, kab, jenis) if kec else None
+        vb_kab = _perlebar(wilayah["bbox"], 0.02) if wilayah else None
+        if kec_info and kec_info.get("bbox"):
+            vb_lokal = _perlebar(kec_info["bbox"], 0.03)
+        elif kec_info:
+            vb_lokal = _perlebar((kec_info["lat"],) * 2 + (kec_info["lon"],) * 2, 0.11)
+        else:
+            vb_lokal = vb_kab
+        cara_kab = (f"Titik di dalam batas {label_wil} (poligon OSM)" if wilayah
+                    else f"Nama {label_wil} cocok di alamat (poligon tidak tersedia)")
+        cara_kec = f" + dekat Kec. {kec}" if kec_info else ""
+
         dicoba = []
-        for presisi, query in lapisan:
+        for presisi, query, lokal in lapisan:
             dicoba.append(query)
-            kandidat = nominatim_cari(query, limit=5, viewbox=viewbox)
-            if presisi != PRESISI_JALAN:   # level wilayah: utamakan objek wilayah/pemukiman
+            if presisi == PRESISI_KEC:                 # lapis (b): pusat kecamatan
+                if kec_info:
+                    return {"status": STATUS_OK, "alasan": "", "lat": kec_info["lat"],
+                            "lon": kec_info["lon"], "presisi": presisi, "query": query,
+                            "validasi": f"Pusat Kec. {kec} · {cara_kab}",
+                            "alamat_geocoder": kec_info["display_name"]}
+                continue
+            kandidat = nominatim_cari(query, limit=5, viewbox=vb_lokal if lokal else vb_kab)
+            if presisi in (PRESISI_DUSUN, PRESISI_DESA):   # utamakan objek pemukiman/wilayah
                 kandidat = sorted(kandidat, key=lambda r: r.get("class") not in ("boundary", "place"))
             for raw in kandidat:
                 lat, lon = float(raw["lat"]), float(raw["lon"])
-                if wilayah:
-                    lolos = titik_dalam_wilayah(lat, lon, wilayah["geojson"])
-                    cara = f"Titik di dalam batas {label_wil} (poligon OSM)"
-                else:
-                    lolos = nama_wilayah_cocok(raw, kab)
-                    cara = f"Nama {label_wil} cocok di alamat (poligon tidak tersedia)"
-                if lolos:
+                lolos = (titik_dalam_wilayah(lat, lon, wilayah["geojson"]) if wilayah
+                         else nama_wilayah_cocok(raw, kab))
+                if lolos and dekat_kecamatan(lat, lon, kec_info):
                     return {"status": STATUS_OK, "alasan": "", "lat": lat, "lon": lon,
-                            "presisi": presisi, "query": query, "validasi": cara,
+                            "presisi": presisi, "query": query,
+                            "validasi": f"{cara_kab}{cara_kec}",
                             "alamat_geocoder": raw.get("display_name", "")}
         return _gagal(f"Tidak ditemukan di dalam wilayah {label_wil}",
                       query=" | ".join(dicoba))
@@ -686,7 +839,7 @@ def geocode_berlapis(info: dict) -> dict:
 def rekaman_baru(id_: str, nama_file: str) -> dict:
     return {
         "id": id_, "file": nama_file, "no_lp": "", "waktu": "", "polres": "",
-        "tkp": "", "sumber_tkp": "", "jalan": "", "desa": "", "kecamatan": "",
+        "tkp": "", "sumber_tkp": "", "jalan": "", "poi": "", "dusun": "", "desa": "", "kecamatan": "",
         "kabupaten": "", "jenis_wilayah": "", "sumber_wilayah": "", "patokan": "",
         "lat": None, "lon": None, "presisi": "", "status": STATUS_GAGAL,
         "alasan": "", "query": "", "validasi": "", "alamat_geocoder": "",
@@ -796,6 +949,15 @@ def url_cari(teks: str) -> str:
     return "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(teks)
 
 
+def teks_cari_google(r: dict) -> str:
+    """Kata kunci pencarian Google Maps dari patokan + dusun + desa + kec + kab.
+    Google Maps biasanya jauh lebih kenal patokan lokal (pasar, warung, SD)."""
+    bagian = [r.get("poi"), r.get("dusun") and f"Dusun {r['dusun']}",
+              r.get("desa"), r.get("kecamatan"), r.get("kabupaten")]
+    teks = ", ".join(b for b in bagian if b)
+    return teks if (r.get("poi") or r.get("dusun") or r.get("desa")) else (r.get("tkp") or teks)
+
+
 # =============================================================================
 # 8. PETA FOLIUM
 # =============================================================================
@@ -807,7 +969,9 @@ def _html_popup(r: dict) -> str:
         f"<b>{e(_potong(r.get('no_lp') or r['file'], 70))}</b><br>"
         f"{e(_potong(r.get('tkp', ''), 130))}<br>"
         f"<span style='color:#666'>Presisi: {e(r.get('presisi', ''))}</span><br>"
-        f"<a href='{nav}' target='_blank' rel='noopener' style='display:inline-block;"
+        + ("<span style='color:#b45309'>⚠️ Perkiraan — bukan titik TKP persis</span><br>"
+           if r.get("presisi") in PRESISI_KASAR else "")
+        + f"<a href='{nav}' target='_blank' rel='noopener' style='display:inline-block;"
         "margin-top:6px;padding:7px 12px;background:#1a73e8;color:#fff;border-radius:6px;"
         "text-decoration:none;font-weight:600'>🧭 Navigasi</a></div>"
     )
@@ -850,12 +1014,14 @@ def buat_peta(titik: list[dict], gps: dict | None, radius_km: float,
         m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], max_zoom=15)
 
     # --- Marker TKP dikelompokkan dengan MarkerCluster
-    cluster = MarkerCluster(name="TKP laka", disableClusteringAtZoom=17,
+    # Tanpa disableClusteringAtZoom: LP yang jatuh di titik SAMA tetap jadi cluster
+    # dan "dipencarkan" (spiderfy) saat diketuk, tidak saling menutupi.
+    cluster = MarkerCluster(name="TKP laka", maxClusterRadius=45,
                             spiderfyOnMaxZoom=True, showCoverageOnHover=False).add_to(m)
     for r in titik:
         dalam = gps is None or r["id"] in id_dalam_radius
         warna = WARNA_MARKER.get(r.get("presisi"), "red") if dalam else "lightgray"
-        ikon = "crosshairs" if r.get("presisi") == PRESISI_KEC else "car"
+        ikon = "crosshairs" if r.get("presisi") in (PRESISI_KEC, PRESISI_KEC_LAMA) else "car"
         folium.Marker(
             [r["lat"], r["lon"]],
             popup=folium.Popup(_html_popup(r), max_width=280),
@@ -1020,13 +1186,18 @@ def kartu_lp(r: dict, jarak_km: float | None) -> None:
         baris = []
         if jarak_km is not None:
             baris.append(f"📏 **{_fmt_km(jarak_km)}** dari posisi Anda")
+        kasar = ada_titik and r.get("presisi") in PRESISI_KASAR
         if ada_titik:
             baris.append(f"🎯 Presisi titik: **{_md(r.get('presisi'))}**")
+            if kasar:
+                baris.append("⚠️ *Titik perkiraan, bukan lokasi TKP persis — cek lewat "
+                             "tombol Cari, lalu simpan koordinat yang benar di Detail.*")
         else:
             baris.append(f"❗ **{STATUS_GAGAL}** — {_md(r.get('alasan'))}")
         if r.get("tkp"):
             baris.append(f"📍 {_md(_potong(r['tkp'], 170))}")
         wilayah = " · ".join(x for x in [
+            f"Dsn. {r['dusun']}" if r.get("dusun") else "",
             f"Ds. {r['desa']}" if r.get("desa") else "",
             f"Kec. {r['kecamatan']}" if r.get("kecamatan") else "",
             f"{r.get('jenis_wilayah') or 'Kab/Kota'} {r['kabupaten']}" if r.get("kabupaten") else "",
@@ -1043,15 +1214,16 @@ def kartu_lp(r: dict, jarak_km: float | None) -> None:
         if ada_titik:
             st.link_button("🧭 Mulai Survei / Navigasi", url_navigasi(r["lat"], r["lon"]),
                            type="primary", width="stretch")
-        else:
-            q = r.get("tkp") or ", ".join(x for x in [r.get("kecamatan"), r.get("kabupaten")] if x)
-            if q:
-                st.link_button("🔎 Cari TKP di Google Maps", url_cari(q), width="stretch")
+        q = teks_cari_google(r)
+        if q and (kasar or not ada_titik):
+            st.link_button(f"🔎 Cari “{_md(_potong(q, 40))}” di Google Maps", url_cari(q),
+                           width="stretch")
 
         with st.expander("ℹ️ Detail & koreksi titik"):
             detail = [
                 f"**Sumber alamat:** {_md(r.get('sumber_tkp') or '-')}",
                 f"**Sumber kab/kota:** {_md(r.get('sumber_wilayah') or '-')}",
+                f"**Patokan dicari:** {_md(r.get('poi') or '-')}",
                 f"**Jalan:** {_md(r.get('jalan') or '-')}",
                 f"**Polres:** {_md(r.get('polres') or '-')}",
                 f"**Query geocoding:** {_md(r.get('query') or '-')}",
@@ -1068,7 +1240,8 @@ def _cocok_pencarian(r: dict, kata: str) -> bool:
     if not kata:
         return True
     gabung = " ".join(str(r.get(k) or "") for k in
-                      ("no_lp", "file", "tkp", "jalan", "desa", "kecamatan", "kabupaten"))
+                      ("no_lp", "file", "tkp", "jalan", "poi", "dusun", "desa", "kecamatan",
+                       "kabupaten"))
     return all(k in gabung.lower() for k in kata.lower().split())
 
 
@@ -1110,8 +1283,8 @@ def main() -> None:
             st.session_state._peta_sidik = sidik
         st_folium(st.session_state._peta, key=f"peta_{sidik}",
                   height=TINGGI_PETA, use_container_width=True, returned_objects=[])
-        st.caption("🔴 Jalan · 🟠 Desa · 🔵 Titik tengah kecamatan · 🟣 Manual · "
-                   "⚪ Di luar radius")
+        st.caption("🔴 Patokan/jalan · 🟠 Dusun/desa · 🔵 Pusat kecamatan (perkiraan) · "
+                   "🟣 Manual · ⚪ Di luar radius")
 
     if not semua:
         st.info("Upload PDF LP untuk mulai memetakan TKP.")
